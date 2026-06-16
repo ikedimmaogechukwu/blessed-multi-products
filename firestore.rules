@@ -1,0 +1,120 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net (default deny)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- REUSABLE SECURITY UTILITIES ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isEmailVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        request.auth.token.email == "ogechukwublessing009@gmail.com" &&
+        request.auth.token.email_verified == true
+      );
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // --- ENTITY MATCH RULES ---
+
+    // 1. PRODUCTS
+    match /products/{productId} {
+      // Helper to validate product schema
+      function isValidProduct(data) {
+        return data.keys().hasAll(['name', 'category', 'price', 'stockQuantity']) 
+          && data.name is string && data.name.size() > 0 && data.name.size() <= 200
+          && data.category is string && data.category.size() > 0 && data.category.size() <= 100
+          && data.price is number && data.price >= 0
+          && data.stockQuantity is number && data.stockQuantity >= 0;
+      }
+
+      allow read: if true;
+      allow create: if isAdmin() && isValidId(productId) && isValidProduct(incoming());
+      allow update: if isAdmin() && isValidProduct(incoming());
+      allow delete: if isAdmin();
+    }
+
+    // 2. ORDERS
+    match /orders/{orderId} {
+      function isValidOrder(data) {
+        return data.keys().hasAll(['customerName', 'customerPhone', 'shippingAddress', 'items', 'totalAmount'])
+          && data.customerName is string && data.customerName.size() <= 150
+          && data.customerPhone is string && data.customerPhone.size() <= 30
+          && data.shippingAddress is string && data.shippingAddress.size() <= 500
+          && data.items is list
+          && data.totalAmount is number && data.totalAmount >= 0;
+      }
+
+      // Read rules
+      allow get: if isAdmin() || (isSignedIn() && existing().userId == request.auth.uid);
+      allow list: if isAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
+
+      // Write rules - Customers can submit standard secure orders or guests can order
+      allow create: if isValidId(orderId) && isValidOrder(incoming()) && (
+        !incoming().keys().hasAny(['userId']) ||
+        incoming().userId == 'guest' ||
+        incoming().userId == request.auth.uid
+      );
+
+      // Only admins can modify order status or update order elements
+      allow update: if isAdmin() && isValidOrder(incoming());
+      allow delete: if isAdmin();
+    }
+
+    // 3. USERS (Profiles)
+    match /users/{userId} {
+      function isValidUser(data) {
+        return data.keys().hasAll(['fullName', 'email'])
+          && data.fullName is string && data.fullName.size() <= 150
+          && data.email is string && data.email.size() <= 150;
+      }
+
+      allow read: if isAdmin() || isOwner(userId);
+      allow create: if isOwner(userId) && isValidUser(incoming()) && (
+        !incoming().keys().hasAny(['isAdmin']) || incoming().isAdmin == false
+      );
+      allow update: if (isOwner(userId) || isAdmin()) && isValidUser(incoming()) && (
+        // Safeguard to prevent normal users from making themselves an admin
+        (!incoming().keys().hasAny(['isAdmin']) && !existing().keys().hasAny(['isAdmin'])) ||
+        incoming().isAdmin == existing().isAdmin ||
+        isAdmin()
+      );
+      allow delete: if isAdmin();
+    }
+
+    // 4. WISHLISTS
+    match /wishlists/{userId} {
+      allow read, write: if isOwner(userId);
+    }
+
+    // 5. SETTINGS (Global website configuration)
+    match /settings/{docName} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+  }
+}

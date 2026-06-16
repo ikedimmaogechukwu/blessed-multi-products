@@ -1,0 +1,111 @@
+{
+  "entities": {
+    "Product": {
+      "title": "Product",
+      "description": "Details of an item for sale in the Blessed Multi-Products store.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique identifier of the product" },
+        "name": { "type": "string", "description": "Display name of the product" },
+        "description": { "type": "string", "description": "Full details of features, specs, and contents" },
+        "category": { "type": "string", "description": "Top-level category, e.g. Food Items, Phones, Laptops" },
+        "subcategory": { "type": "string", "description": "Sub-category, e.g. Rice, Beans, Samsung, HP" },
+        "price": { "type": "number", "description": "Unit price in Naria (or other currency)" },
+        "stockQuantity": { "type": "number", "description": "Number of items remaining in stock" },
+        "rating": { "type": "number", "description": "Average review rating from 1 to 5" },
+        "images": { "type": "array", "description": "List of URLs for product images" },
+        "isFeatured": { "type": "boolean", "description": "Shown on home screen featured section" },
+        "isBestSeller": { "type": "boolean", "description": "Shown on home screen bestseller section" },
+        "reviews": { "type": "array", "description": "List of customer reviews" }
+      },
+      "required": ["name", "category", "price", "stockQuantity"]
+    },
+    "Order": {
+      "title": "Order",
+      "description": "Records of purchases made by customers.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string", "description": "ID of buying user, can be 'guest'" },
+        "customerName": { "type": "string" },
+        "customerEmail": { "type": "string" },
+        "customerPhone": { "type": "string" },
+        "shippingAddress": { "type": "string" },
+        "paymentMethod": { "type": "string", "description": "Paystack, Flutterwave, or Bank Transfer" },
+        "paymentStatus": { "type": "string", "description": "pending, paid, or failed" },
+        "orderStatus": { "type": "string", "description": "Pending, Processing, Shipped, Delivered, Cancelled" },
+        "items": { "type": "array", "description": "Array of products ordered with quantity" },
+        "totalAmount": { "type": "number" },
+        "discountAmount": { "type": "number" },
+        "couponUsed": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["customerName", "customerPhone", "shippingAddress", "items", "totalAmount"]
+    },
+    "User": {
+      "title": "User",
+      "description": "User profile definitions synchronized with Auth.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "fullName": { "type": "string" },
+        "email": { "type": "string" },
+        "phone": { "type": "string" },
+        "savedAddresses": { "type": "array" },
+        "isAdmin": { "type": "boolean", "description": "True if user is admin" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["email", "fullName"]
+    },
+    "Wishlist": {
+      "title": "Wishlist",
+      "description": "Saved list of items per user.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "productIds": { "type": "array" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "productIds"]
+    },
+    "Settings": {
+      "title": "Settings",
+      "description": "Global website settings, contact info, and home banners managed by admin.",
+      "type": "object",
+      "properties": {
+        "whatsappNumber": { "type": "string" },
+        "whatsappLink": { "type": "string" },
+        "emailAddress": { "type": "string" },
+        "businessAddress": { "type": "string" },
+        "businessHours": { "type": "string" },
+        "promoTitle": { "type": "string" },
+        "promoSubtitle": { "type": "string" },
+        "bannerImages": { "type": "array" }
+      },
+      "required": ["whatsappNumber"]
+    }
+  },
+  "firestore": {
+    "/products/{productId}": {
+      "schema": "Product",
+      "description": "Blessed Multi-Products store items."
+    },
+    "/orders/{orderId}": {
+      "schema": "Order",
+      "description": "Customer order records."
+    },
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "Store users profiles."
+    },
+    "/wishlists/{userId}": {
+      "schema": "Wishlist",
+      "description": "Users wishlists."
+    },
+    "/settings/global": {
+      "schema": "Settings",
+      "description": "Global store configs."
+    }
+  }
+}

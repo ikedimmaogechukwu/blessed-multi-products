@@ -1,0 +1,6 @@
+{
+  "name": "Blessed Multi-Products",
+  "description": "E-Commerce website for Blessed Multi-Products with premium Blue and Gold branding. Features products (food, phones, laptops), secure admin dashboard, checkout, cart, wishlist, and WhatsApp integration.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
