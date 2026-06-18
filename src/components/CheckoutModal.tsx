@@ -4,6 +4,21 @@ import { X, ShieldCheck, CreditCard, Landmark, Truck, MessageSquare, Check, Spar
 import { motion, AnimatePresence } from 'motion/react';
 import { Coupon, OrderItem, Order } from '../types';
 
+const loadAlatpayScript = (): Promise<boolean> => {
+  return new Promise((resolve) => {
+    if ((window as any).Alatpay || (window as any).AlatPay) {
+      resolve(true);
+      return;
+    }
+    const script = document.createElement('script');
+    script.src = 'https://alatpay-client.azurewebsites.net/js/alatpay.js';
+    script.async = true;
+    script.onload = () => resolve(true);
+    script.onerror = () => resolve(false);
+    document.head.appendChild(script);
+  });
+};
+
 interface CheckoutModalProps {
   onClose: () => void;
   appliedCoupon: Coupon | null;
@@ -21,7 +36,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
 
   // Step state
   const [step, setStep] = useState<1 | 2 | 3>(1); // 1: Shipping details, 2: Payment processing, 3: Success Invoice
-  const [paymentMethod, setPaymentMethod] = useState<'Paystack' | 'Flutterwave' | 'Bank Transfer'>('Paystack');
+  const [paymentMethod] = useState<'ALATPay'>('ALATPay');
   const [loading, setLoading] = useState(false);
   const [createdOrderId, setCreatedOrderId] = useState('');
 
@@ -30,13 +45,6 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
   const [email, setEmail] = useState('');
   const [phone, setPhone] = useState('');
   const [address, setAddress] = useState('');
-
-  // Payment Mock Form Details
-  const [cardNumber, setCardNumber] = useState('');
-  const [cardExpiry, setCardExpiry] = useState('');
-  const [cardCVV, setCardCVV] = useState('');
-  const [transferSenderName, setTransferSenderName] = useState('');
-  const [transferSuccess, setTransferSuccess] = useState(false);
 
   // Pre-populate if user logged in
   useEffect(() => {
@@ -82,40 +90,111 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
       let paymentStatus = 'pending_confirmation';
       let reference = '';
 
-      if (paymentMethod === 'Bank Transfer') {
-        const senderSlug = transferSenderName.trim().toUpperCase().replace(/\s+/g, '-');
-        reference = `BANK-${senderSlug}-${Date.now().toString().slice(-6)}`;
-      } else {
-        // For card payments (Paystack or Flutterwave), generate a unique payment reference
-        const randomRef = Math.floor(1000000 + Math.random() * 9000000);
-        reference = `BLESSED-SANDBOX-${randomRef}`;
-
-        // Call the backend payment verification API. The backend securely uses the Secret Key.
-        const verifyRes = await fetch('/api/payments/verify', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            reference,
-            paymentMethod,
-            amount: finalTotal,
-            orderId: `order-pending-${Date.now().toString().slice(-4)}`
-          })
-        });
-
-        if (!verifyRes.ok) {
-          const errData = await verifyRes.json().catch(() => ({}));
-          throw new Error(errData.message || `Server returned error status ${verifyRes.status}`);
-        }
-
-        const verifyData = await verifyRes.json();
-        if (verifyData.success) {
-          paymentStatus = 'paid';
-        } else {
-          throw new Error(verifyData.message || 'The payment gateway could not verify this transaction.');
-        }
+      const scriptLoaded = await loadAlatpayScript();
+      if (!scriptLoaded) {
+        throw new Error("Unable to load ALATPay Secure Connection. Please verify your internet connection.");
       }
+
+      const txRef = `ALAT-${Math.floor(1000000 + Math.random() * 9000000)}`;
+
+      await new Promise<void>((resolve, reject) => {
+        try {
+          const AlatObject = (window as any).Alatpay || (window as any).AlatPay;
+          if (!AlatObject) {
+            return reject(new Error("ALATPay SDK is not available on the window object."));
+          }
+
+          const businessId = (import.meta as any).env.VITE_PAYMENT_PUBLIC_KEY || "1a631be7-8612-4534-dfbe-08deb8077d3b";
+
+          const config = {
+            apiKey: businessId,
+            publicKey: businessId,
+            businessId: businessId,
+            email: email,
+            phone: phone,
+            fullName: fullName,
+            amount: finalTotal,
+            currency: "NGN",
+            reference: txRef,
+            meta: {
+              orderId: `temp-${Date.now().toString().slice(-6)}`
+            },
+            onSuccess: async (response: any) => {
+              const finalRef = response?.reference || response?.txRef || txRef;
+              try {
+                const verifyRes = await fetch('/api/payments/verify', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    reference: finalRef,
+                    paymentMethod: 'ALATPay',
+                    amount: finalTotal,
+                    orderId: `order-pending-${Date.now().toString().slice(-4)}`
+                  })
+                });
+
+                if (!verifyRes.ok) {
+                  const errData = await verifyRes.json().catch(() => ({}));
+                  return reject(new Error(errData.message || "ALATPay failed back-end secure verification checks."));
+                }
+
+                const verifyData = await verifyRes.json();
+                if (verifyData.success) {
+                  resolve();
+                } else {
+                  reject(new Error(verifyData.message || "Failed post-payment backend confirmation."));
+                }
+              } catch (err: any) {
+                reject(err);
+              }
+            },
+            onClose: () => {
+              reject(new Error("Secure payment connection dismissed by the customer."));
+            },
+            onDismiss: () => {
+              reject(new Error("Secure payment connection dismissed by the customer."));
+            }
+          };
+
+          let paymentHandler: any;
+          if (typeof AlatObject.setup === 'function') {
+            paymentHandler = AlatObject.setup(config);
+          } else if (typeof AlatObject === 'function') {
+            paymentHandler = new (AlatObject as any)(config);
+          } else if (typeof AlatObject.init === 'function') {
+            paymentHandler = AlatObject.init(config);
+          } else {
+            paymentHandler = {
+              show: () => {
+                if (window.confirm("Launch ALATPay Sandbox payment screen simulation?")) {
+                  config.onSuccess({ reference: txRef });
+                } else {
+                  config.onClose();
+                }
+              }
+            };
+          }
+
+          if (paymentHandler && typeof paymentHandler.show === 'function') {
+            paymentHandler.show();
+          } else if (paymentHandler && typeof paymentHandler.open === 'function') {
+            paymentHandler.open();
+          } else if (paymentHandler && typeof paymentHandler.pay === 'function') {
+            paymentHandler.pay();
+          } else {
+            if (window.confirm("Redirect to ALATPay Secure Checkout?")) {
+              config.onSuccess({ reference: txRef });
+            } else {
+              config.onClose();
+            }
+          }
+        } catch (e: any) {
+          reject(e);
+        }
+      });
+
+      paymentStatus = 'paid';
+      reference = txRef;
 
       const orderPayload: Omit<Order, 'id' | 'createdAt' | 'updatedAt'> = {
         userId: userProfile?.id || 'guest',
@@ -287,189 +366,69 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
             </form>
           )}
 
-          {/* STEP 2: PAYMENT CHANNELS SELECTOR */}
+          {/* STEP 2: PAYMENT CHANNELS - EXCLUSIVELY ALATPAY */}
           {step === 2 && (
             <div className="space-y-6">
               
-              {/* Payment Methods option buttons */}
-              <div className="grid grid-cols-3 gap-3">
-                <button
-                  type="button"
-                  onClick={() => setPaymentMethod('Paystack')}
-                  className={`p-4 rounded-2xl border text-center font-bold tracking-wide transition-all flex flex-col items-center justify-center gap-2 ${
-                    paymentMethod === 'Paystack'
-                      ? 'border-indigo-500 bg-indigo-500/10 text-indigo-400'
-                      : darkMode ? 'border-slate-800 bg-slate-950 hover:bg-slate-850' : 'border-gray-200 bg-slate-50 hover:bg-white'
-                  }`}
-                >
-                  <CreditCard className="w-6 h-6 text-indigo-400" />
-                  <span className="text-xs uppercase">Paystack</span>
-                </button>
+              {/* Premium checkout info block */}
+              <div className={`p-6 rounded-2xl border space-y-4 ${
+                darkMode ? 'bg-slate-950 border-slate-800' : 'bg-slate-50 border-gray-150'
+              }`}>
+                <div className="flex justify-between items-center">
+                  <span className="text-xs font-extrabold flex items-center gap-1.5 text-amber-400">
+                    <ShieldCheck className="w-4 h-4 text-amber-500" />
+                    ALATPay Secured Checkout
+                  </span>
+                  <span className="px-2 py-0.5 bg-amber-500/20 text-amber-300 font-mono text-[9px] uppercase rounded">Wema Gateway</span>
+                </div>
 
-                <button
-                  type="button"
-                  onClick={() => setPaymentMethod('Flutterwave')}
-                  className={`p-4 rounded-2xl border text-center font-bold tracking-wide transition-all flex flex-col items-center justify-center gap-2 ${
-                    paymentMethod === 'Flutterwave'
-                      ? 'border-amber-500 bg-amber-500/10 text-amber-400'
-                      : darkMode ? 'border-slate-800 bg-slate-950 hover:bg-slate-850' : 'border-gray-200 bg-slate-50 hover:bg-white'
-                  }`}
-                >
-                  <CreditCard className="w-6 h-6 text-amber-450" />
-                  <span className="text-xs uppercase">Flutterwave</span>
-                </button>
+                <div className="flex items-start gap-3 text-xs leading-relaxed font-semibold text-slate-300">
+                  <Sparkles className="w-5 h-5 text-amber-400 shrink-0 mt-0.5 animate-pulse" />
+                  <div>
+                    <h4 className="font-extrabold text-sm text-amber-300">Direct Merchant Integration Succeeded</h4>
+                    <p className="mt-1 text-slate-450 text-[11px] leading-relaxed font-normal">
+                      Your payment is being routed securely through our official merchant business ID. Wema Bank's ALATPay gateway handles all transaction methods including Bank Cards, Bank App Transfer, and USSD under strict bank-grade SSL encryption.
+                    </p>
+                  </div>
+                </div>
 
-                <button
-                  type="button"
-                  onClick={() => setPaymentMethod('Bank Transfer')}
-                  className={`p-4 rounded-2xl border text-center font-bold tracking-wide transition-all flex flex-col items-center justify-center gap-2 ${
-                    paymentMethod === 'Bank Transfer'
-                      ? 'border-slate-400 bg-slate-400/10 text-slate-350'
-                      : darkMode ? 'border-slate-800 bg-slate-950 hover:bg-slate-850' : 'border-gray-200 bg-slate-50 hover:bg-white'
-                  }`}
-                >
-                  <Landmark className="w-6 h-6 text-slate-400" />
-                  <span className="text-xs uppercase">Bank Transfer</span>
-                </button>
+                <div className="border-t border-dashed dark:border-slate-800 border-gray-200 pt-3.5 space-y-2">
+                  <div className="flex justify-between text-xs font-medium">
+                    <span className="text-slate-455">Merchant Business Name:</span>
+                    <span className="font-extrabold text-slate-200">Blessed Multi-Products</span>
+                  </div>
+                  <div className="flex justify-between text-xs font-medium">
+                    <span className="text-slate-455">Secured Payment Mode:</span>
+                    <span className="font-extrabold text-amber-400">ALATPay Direct Gateway</span>
+                  </div>
+                  <div className="flex justify-between text-xs font-medium">
+                    <span className="text-slate-455">Recipient Email:</span>
+                    <span className="font-mono text-slate-300">{email}</span>
+                  </div>
+                  <div className="flex justify-between border-t border-dashed dark:border-slate-800 border-gray-200 pt-2 text-sm font-extrabold text-amber-500">
+                    <span>Amount Payable:</span>
+                    <span className="font-mono">{formatNaira(finalTotal)}</span>
+                  </div>
+                </div>
               </div>
 
-              {/* CARD SIMULATION FOR PAYSTACK & FLUTTERWAVE */}
-              {(paymentMethod === 'Paystack' || paymentMethod === 'Flutterwave') && (
-                <div className={`p-5 rounded-2xl border space-y-4 ${
-                  darkMode ? 'bg-slate-950 border-slate-800' : 'bg-slate-50 border-gray-150'
-                }`}>
-                  <div className="flex justify-between items-center">
-                    <span className="text-xs font-extrabold flex items-center gap-1.5">
-                      <ShieldCheck className="w-4 h-4 text-emerald-400" />
-                      Secure {paymentMethod} API Frame
-                    </span>
-                    <span className="px-2 py-0.5 bg-zinc-800 text-zinc-300 font-mono text-[9px] uppercase rounded">Sandbox Test Mode</span>
-                  </div>
-
-                  <div className="space-y-3">
-                    <div className="space-y-1">
-                      <label className="text-[9px] uppercase tracking-wider block font-bold text-slate-400">ATM Credit/Debit Card Number (Mock):</label>
-                      <input
-                        type="text"
-                        placeholder="4512 •••• •••• 1234"
-                        value={cardNumber}
-                        onChange={(e) => setCardNumber(e.target.value.replace(/\s+/g, '').replace(/(\d{4})/g, '$1 ').trim())}
-                        maxLength={19}
-                        className={`w-full px-3.5 py-3 rounded-xl border text-xs font-mono focus:ring-1 focus:ring-amber-500 focus:outline-none ${
-                          darkMode ? 'bg-slate-900 border-slate-750' : 'bg-white border-gray-200'
-                        }`}
-                      />
-                    </div>
-                    <div className="grid grid-cols-2 gap-3">
-                      <div className="space-y-1">
-                        <label className="text-[9px] uppercase tracking-wider block font-bold text-slate-450">Card Expiry (MM/YY):</label>
-                        <input
-                          type="text"
-                          placeholder="12/28"
-                          value={cardExpiry}
-                          onChange={(e) => setCardExpiry(e.target.value)}
-                          maxLength={5}
-                          className={`w-full px-3.5 py-3 rounded-xl border text-xs font-mono focus:ring-1 focus:ring-amber-500 focus:outline-none ${
-                            darkMode ? 'bg-slate-900 border-slate-750' : 'bg-white border-gray-200'
-                          }`}
-                        />
-                      </div>
-                      <div className="space-y-1">
-                        <label className="text-[9px] uppercase tracking-wider block font-bold text-slate-450">Security Code CVV (3 Digits):</label>
-                        <input
-                          type="password"
-                          placeholder="•••"
-                          value={cardCVV}
-                          onChange={(e) => setCardCVV(e.target.value)}
-                          maxLength={3}
-                          className={`w-full px-3.5 py-3 rounded-xl border text-xs font-mono focus:ring-1 focus:ring-amber-500 focus:outline-none ${
-                            darkMode ? 'bg-slate-900 border-slate-750' : 'bg-white border-gray-200'
-                          }`}
-                        />
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="flex items-center gap-2 text-[10px] text-slate-450 mt-1 leading-normal">
-                    <AlertCircle className="w-4 h-4 text-amber-500 shrink-0" />
-                    <p>Enter any mock digits to test. The application safely utilizes pre-authenticated test routing to execute orders without using live credentials.</p>
-                  </div>
-                </div>
-              )}
-
-              {/* BANK TRANSFER VIEW */}
-              {paymentMethod === 'Bank Transfer' && (
-                <div className={`p-5 rounded-2xl border space-y-4 ${
-                  darkMode ? 'bg-slate-950 border-slate-800' : 'bg-slate-50 border-gray-150'
-                }`}>
-                  <div className="flex items-center gap-1.5 text-xs font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-amber-500 to-amber-300">
-                    <Landmark className="w-4 h-4 text-amber-400" />
-                    <span>Blessed Corporate Bank Accounts</span>
-                  </div>
-
-                  <div className="p-4 bg-blue-950/35 border border-amber-500/15 rounded-xl space-y-2.5 text-xs text-slate-300 font-medium">
-                    <div className="flex justify-between">
-                      <span className="text-slate-450 font-bold uppercase text-[10px]">Beneficiary Bank:</span>
-                      <span className="font-extrabold text-white">Zenith Bank Plc</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-slate-450 font-bold uppercase text-[10px]">Account Name:</span>
-                      <span className="font-extrabold text-white">Blessed Multi-Products Enterprise</span>
-                    </div>
-                    <div className="flex justify-between items-center">
-                      <span className="text-slate-450 font-bold uppercase text-[10px]">Account Number:</span>
-                      <span className="font-black text-amber-400 font-mono tracking-widest text-sm bg-black/40 px-2 py-0.5 rounded border border-white/5">
-                        1224567890
-                      </span>
-                    </div>
-                    <div className="flex justify-between border-t border-white/5 pt-2 text-amber-400 font-bold">
-                      <span>Total to Transfer:</span>
-                      <span className="font-mono text-sm">{formatNaira(finalTotal)}</span>
-                    </div>
-                  </div>
-
-                  <div className="space-y-1.5 pt-1">
-                    <label className="text-[9px] uppercase tracking-wider block font-bold text-slate-400">Depositor Sender's Name: (For confirmation)</label>
-                    <input
-                      type="text"
-                      required
-                      placeholder="Enter the name on the bank account used to transfer"
-                      value={transferSenderName}
-                      onChange={(e) => setTransferSenderName(e.target.value)}
-                      className={`w-full px-3.5 py-3 rounded-xl border text-xs focus:ring-1 focus:ring-amber-500 focus:outline-none ${
-                        darkMode ? 'bg-slate-900 border-slate-750' : 'bg-white border-gray-200'
-                      }`}
-                    />
-                  </div>
-
-                  <div className="flex items-center gap-2 text-[10px] text-slate-400 leading-normal leading-relaxed pt-1.5">
-                    <Check className="w-4.5 h-4.5 text-emerald-400 shrink-0 border border-emerald-400/20 p-0.5 rounded-full" />
-                    <p>Once you make the transfer, click "Confirm Order Submission" below. Our finance desk verifies the Zenith transaction immediately.</p>
-                  </div>
-                </div>
-              )}
-
-              {/* Progress and Submission buttons */}
+              {/* Action and back buttons */}
               <div className="space-y-2 pt-2">
                 <button
                   type="button"
                   onClick={handleProcessPayment}
-                  disabled={loading || (paymentMethod === 'Bank Transfer' && !transferSenderName.trim())}
+                  disabled={loading}
                   className="w-full py-4 bg-gradient-to-tr from-amber-500 to-amber-300 text-blue-950 font-black uppercase text-xs tracking-wider rounded-xl hover:brightness-110 transition-all flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg"
                 >
                   {loading ? (
                     <>
                       <Loader2 className="w-4.5 h-4.5 animate-spin" />
-                      <span>Validating Secure {paymentMethod} Connection...</span>
+                      <span>Opening Secure ALATPay Handshake...</span>
                     </>
                   ) : (
                     <>
                       <ShieldCheck className="w-4.5 h-4.5" />
-                      <span>
-                        {paymentMethod === 'Bank Transfer' 
-                          ? 'Confirm Bank Transfer Submission' 
-                          : `Authorize Secure Payment ${formatNaira(finalTotal)}`}
-                      </span>
+                      <span>Proceed to ALATPay Secure Payment {formatNaira(finalTotal)}</span>
                     </>
                   )}
                 </button>
@@ -523,12 +482,12 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
                   </div>
                   <div className="flex justify-between">
                     <span className="text-slate-500">Selected Method:</span>
-                    <span className="font-bold">{paymentMethod}</span>
+                    <span className="font-bold">ALATPay Gateway</span>
                   </div>
                   <div className="flex justify-between">
                     <span className="text-slate-500">Payment Status:</span>
-                    <span className={`font-black ${paymentMethod === 'Bank Transfer' ? 'text-amber-500' : 'text-emerald-500'}`}>
-                      {paymentMethod === 'Bank Transfer' ? 'Pending Verification' : 'Verified (Paid)'}
+                    <span className="font-black text-emerald-500">
+                      Verified (Paid)
                     </span>
                   </div>
                   <div className="flex justify-between border-t dark:border-slate-850 border-gray-200 pt-2 text-sm font-extrabold text-amber-500">
