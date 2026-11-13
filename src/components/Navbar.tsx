@@ -73,17 +73,30 @@ export const Navbar: React.FC<NavbarProps> = ({
           <span className="text-[10px] text-slate-300 normal-case">Database Engine:</span>
           <button
             onClick={() => {
-              const newMode = dbMode === 'local' ? 'firebase' : 'local';
-              setDbMode(newMode);
+              const nextMode =
+                dbMode === 'cloudflare'
+                  ? 'local'
+                  : dbMode === 'local'
+                  ? 'firebase'
+                  : 'cloudflare';
+              setDbMode(nextMode);
             }}
             className={`px-2.5 py-0.5 rounded text-[10px] uppercase font-black font-mono transition-all flex items-center gap-1 cursor-pointer select-none border ${
-              dbMode === 'local'
+              dbMode === 'cloudflare'
+                ? 'bg-orange-500/10 text-orange-400 border-orange-500/35 hover:bg-orange-500/20'
+                : dbMode === 'local'
                 ? 'bg-amber-500/10 text-amber-400 border-amber-500/35 hover:bg-amber-500/20'
                 : 'bg-blue-600/10 text-blue-400 border-blue-500/35 hover:bg-blue-600/20'
             }`}
-            title="Click to toggle Storage and Auth backend instantly!"
+            title="Click to toggle Storage and Auth backend (Cloudflare / Local / Firestore)"
           >
-            <span>{dbMode === 'local' ? '📦 Local Sandbox' : '☁️ Cloud Firestore'}</span>
+            <span>
+              {dbMode === 'cloudflare'
+                ? '⚡ Cloudflare Backend'
+                : dbMode === 'local'
+                ? '📦 Local Sandbox'
+                : '☁️ Cloud Firestore'}
+            </span>
           </button>
         </div>
       </div>

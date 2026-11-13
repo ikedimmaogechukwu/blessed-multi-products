@@ -24,6 +24,8 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ darkMode, setTab }) => {
     coupons,
     settings,
     dbMode,
+    cloudflareStatus,
+    checkCloudflareBackend,
     addProduct,
     editProduct,
     deleteProduct,
@@ -284,7 +286,13 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ darkMode, setTab }) => {
       bannerImages: bannerImgs
     };
     await updateSettings(storeSettings);
-    alert(`Corporate settings files synced successfully inside ${dbMode === 'local' ? 'Local Sandbox Storage' : 'Firestore'}!`);
+    const engineLabel =
+      dbMode === 'cloudflare'
+        ? 'Cloudflare Backend'
+        : dbMode === 'local'
+        ? 'Local Sandbox Storage'
+        : 'Firestore';
+    alert(`Corporate settings files synced successfully inside ${engineLabel}!`);
   };
 
   const handleCreateCoupon = async (e: React.FormEvent) => {
@@ -326,13 +334,21 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ darkMode, setTab }) => {
         <div>
           <span className="text-[10px] tracking-widest font-black uppercase text-amber-400 font-mono">Control Panel Dashboard</span>
           <h2 className="text-2xl font-black tracking-tight leading-none mt-1">Blessed Management Suite</h2>
-          <p className="text-xs text-slate-400 mt-2">Logged in as: <span className="text-white font-bold">{user?.email}</span> ({dbMode === 'local' ? 'Local Sandbox Administrator' : 'Administrator status validated'})</p>
+          <p className="text-xs text-slate-400 mt-2">
+            Logged in as: <span className="text-white font-bold">{user?.email}</span> (
+            {dbMode === 'cloudflare'
+              ? 'Cloudflare Backend Administrator'
+              : dbMode === 'local'
+              ? 'Local Sandbox Administrator'
+              : 'Administrator status validated'}
+            )
+          </p>
         </div>
         <div className="flex items-center gap-2.5">
           <button
             onClick={seedDatabase}
             className="px-4 py-2.5 bg-gradient-to-tr from-amber-500 to-amber-300 text-blue-950 font-black rounded-xl text-xs uppercase tracking-wider flex items-center gap-1.5 active:scale-95 transition-transform"
-            title="Populates Firestore tables with template catalog products"
+            title="Populates active database tables with template catalog products"
             id="seed-database-btn"
           >
             <Database className="w-4 h-4 text-blue-950" />
@@ -341,13 +357,56 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ darkMode, setTab }) => {
         </div>
       </div>
 
+      {dbMode === 'cloudflare' && (
+        <div className={`p-5 rounded-2xl border flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 ${
+          darkMode ? 'bg-slate-900/90 border-orange-500/30' : 'bg-orange-50/70 border-orange-200'
+        }`}>
+          <div className="flex items-start gap-3.5">
+            <div className="p-3 bg-orange-500/10 rounded-xl border border-orange-500/30 text-orange-500 shrink-0">
+              <Database className="w-5 h-5" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] font-black uppercase tracking-widest text-orange-500 font-mono">Cloudflare Backend</span>
+                <span className={`px-2 py-0.5 text-[9px] font-bold uppercase rounded-full ${
+                  cloudflareStatus.d1Connected
+                    ? 'bg-emerald-500/20 text-emerald-500'
+                    : 'bg-amber-500/20 text-amber-500'
+                }`}>
+                  {cloudflareStatus.d1Connected ? 'API & Storage Ready' : 'D1 Binding Pending'}
+                </span>
+              </div>
+              <h4 className={`text-sm font-bold tracking-tight mt-0.5 ${darkMode ? 'text-white' : 'text-slate-900'}`}>
+                Pages Functions (<code className="text-orange-500 font-mono text-xs">/api/*</code>) — Runtime: <code className="font-mono text-xs">{cloudflareStatus.runtime}</code>
+              </h4>
+              <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+                {cloudflareStatus.d1Connected
+                  ? 'Connected to backend API endpoints (/api/bootstrap, /api/products, /api/orders, /api/payments/verify).'
+                  : 'Bind a Cloudflare D1 database named DB in Cloudflare Pages Settings -> Functions -> D1 database bindings (schema in cloudflare-d1-schema.sql).'}
+              </p>
+              {cloudflareStatus.error && (
+                <p className="text-xs text-amber-500 mt-1 font-mono">{cloudflareStatus.error}</p>
+              )}
+            </div>
+          </div>
+          <button
+            onClick={checkCloudflareBackend}
+            disabled={cloudflareStatus.checking}
+            className="px-4 py-2 bg-orange-500 hover:bg-orange-600 text-slate-950 font-bold rounded-xl text-xs uppercase tracking-wider flex items-center gap-1.5 active:scale-95 transition-all shrink-0 cursor-pointer"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${cloudflareStatus.checking ? 'animate-spin' : ''}`} />
+            <span>{cloudflareStatus.checking ? 'Checking...' : 'Check API Status'}</span>
+          </button>
+        </div>
+      )}
+
       {dbMode === 'local' && (
         <div className="p-4.5 bg-amber-500/10 border border-amber-500/30 rounded-2xl flex items-start gap-3 text-amber-500">
           <AlertCircle className="w-5 h-5 shrink-0 mt-0.5" />
           <div className="space-y-1">
             <h4 className="text-xs font-black uppercase tracking-wider">📦 Offline-Safe local Sandbox Mode Active</h4>
             <p className="text-[11px] text-slate-400 leading-relaxed">
-              To satisfy your local development needs with zero Firebase cloud connection dependencies, Blessed is configured inside its offline local state engine. All catalog and settings modifications you execute will persist safely in your browser storage and will be immediately reflected in real-time across the storefront!
+              To satisfy your local development needs with zero cloud connection dependencies, Blessed is configured inside its offline local state engine. All catalog and settings modifications you execute will persist safely in your browser storage and will be immediately reflected in real-time across the storefront!
             </p>
           </div>
         </div>

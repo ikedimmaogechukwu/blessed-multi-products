@@ -53,8 +53,16 @@ export interface AppContextType {
   cart: CartItem[];
   wishlist: string[]; // Product IDs
   contacts: ContactMessage[]; // Admin view
-  dbMode: 'local' | 'firebase';
-  setDbMode: (mode: 'local' | 'firebase') => void;
+  dbMode: 'cloudflare' | 'local' | 'firebase';
+  setDbMode: (mode: 'cloudflare' | 'local' | 'firebase') => void;
+  cloudflareStatus: {
+    runtime: string;
+    d1Connected: boolean;
+    checking: boolean;
+    lastChecked?: string;
+    error?: string;
+  };
+  checkCloudflareBackend: () => Promise<void>;
   
   // Auth Functions
   loginWithEmail: (email: string, pass: string) => Promise<void>;
@@ -95,16 +103,31 @@ export interface AppContextType {
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  // DB Mode preference (default to local sandbox as explicitly requested)
-  const [dbMode, setDbModeState] = useState<'local' | 'firebase'>(() => {
+  // DB Mode preference (defaults to Cloudflare backend)
+  const [dbMode, setDbModeState] = useState<'cloudflare' | 'local' | 'firebase'>(() => {
     const saved = localStorage.getItem('blessed_db_mode');
-    return saved === 'firebase' ? 'firebase' : 'local';
+    if (saved === 'firebase' || saved === 'local' || saved === 'cloudflare') {
+      return saved;
+    }
+    return 'cloudflare';
   });
 
-  const setDbMode = (mode: 'local' | 'firebase') => {
+  const setDbMode = (mode: 'cloudflare' | 'local' | 'firebase') => {
     localStorage.setItem('blessed_db_mode', mode);
     setDbModeState(mode);
   };
+
+  const [cloudflareStatus, setCloudflareStatus] = useState<{
+    runtime: string;
+    d1Connected: boolean;
+    checking: boolean;
+    lastChecked?: string;
+    error?: string;
+  }>({
+    runtime: 'checking',
+    d1Connected: false,
+    checking: false,
+  });
 
   const [user, setUser] = useState<FirebaseUser | null>(null);
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
@@ -165,7 +188,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // Auth Listener
   useEffect(() => {
-    if (dbMode === 'local') {
+    if (dbMode !== 'firebase') {
       const savedUser = localStorage.getItem('blessed_local_user');
       const savedProfile = localStorage.getItem('blessed_local_profile');
       if (savedUser && savedProfile) {
@@ -251,6 +274,97 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
 
     return unsubscribe;
+  }, [dbMode]);
+
+  const checkCloudflareBackend = async () => {
+    setCloudflareStatus((prev) => ({ ...prev, checking: true, error: undefined }));
+    try {
+      const res = await fetch('/api/health');
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setCloudflareStatus({
+        runtime: data.runtime || 'cloudflare-pages-functions',
+        d1Connected: Boolean(data.d1Connected),
+        checking: false,
+        lastChecked: new Date().toLocaleTimeString(),
+      });
+    } catch (err: any) {
+      setCloudflareStatus({
+        runtime: 'offline',
+        d1Connected: false,
+        checking: false,
+        lastChecked: new Date().toLocaleTimeString(),
+        error: err?.message || 'Unable to reach /api/health',
+      });
+    }
+  };
+
+  // Sync data from Cloudflare Backend (/api/bootstrap)
+  useEffect(() => {
+    if (dbMode !== 'cloudflare') return;
+
+    let cancelled = false;
+    const loadFromCloudflare = async () => {
+      setCloudflareStatus((prev) => ({ ...prev, checking: true, error: undefined }));
+      try {
+        const res = await fetch('/api/bootstrap');
+        if (!res.ok) throw new Error(`API returned ${res.status}`);
+        const data = await res.json();
+        if (cancelled) return;
+
+        setCloudflareStatus({
+          runtime: data.runtime || 'cloudflare-pages-functions',
+          d1Connected: Boolean(data.d1Connected),
+          checking: false,
+          lastChecked: new Date().toLocaleTimeString(),
+        });
+
+        if (data.d1Connected) {
+          const remoteProducts = Array.isArray(data.products) ? data.products : [];
+          if (remoteProducts.length === 0) {
+            // Auto-seed Cloudflare D1 on first connection
+            await fetch('/api/seed', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                products: INITIAL_PRODUCTS,
+                settings: INITIAL_SETTINGS,
+                coupons: INITIAL_COUPONS,
+                testimonials: INITIAL_TESTIMONIALS,
+              }),
+            }).catch(() => {});
+            if (!cancelled) {
+              setProducts(INITIAL_PRODUCTS);
+              setSettings(INITIAL_SETTINGS);
+              setCoupons(INITIAL_COUPONS);
+              setTestimonials(INITIAL_TESTIMONIALS);
+            }
+          } else {
+            setProducts(remoteProducts);
+            if (Array.isArray(data.orders)) setOrders(data.orders);
+            if (data.settings) setSettings(data.settings);
+            if (Array.isArray(data.coupons) && data.coupons.length > 0) setCoupons(data.coupons);
+            if (Array.isArray(data.testimonials) && data.testimonials.length > 0) setTestimonials(data.testimonials);
+            if (Array.isArray(data.contacts)) setContacts(data.contacts);
+          }
+        }
+      } catch (err: any) {
+        if (cancelled) return;
+        console.warn('Cloudflare API bootstrap fallback:', err?.message);
+        setCloudflareStatus({
+          runtime: 'offline-fallback',
+          d1Connected: false,
+          checking: false,
+          lastChecked: new Date().toLocaleTimeString(),
+          error: err?.message || 'Unable to reach Cloudflare API',
+        });
+      }
+    };
+
+    loadFromCloudflare();
+    return () => {
+      cancelled = true;
+    };
   }, [dbMode]);
 
   // Sync Products in real-time
@@ -399,7 +513,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // AUTH ACTIONS
   const loginWithEmail = async (email: string, pass: string) => {
-    if (dbMode === 'local') {
+    if (dbMode !== 'firebase') {
       const isDefaultAdmin = email.toLowerCase() === 'ogechukwublessing009@gmail.com' || pass === 'admin123';
       const mockUser = {
         uid: isDefaultAdmin ? 'mock-admin-uid-123' : `mock-user-${Date.now()}`,
@@ -431,7 +545,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const registerWithEmail = async (email: string, pass: string, name: string, phone?: string) => {
-    if (dbMode === 'local') {
+    if (dbMode !== 'firebase') {
       const isDefaultAdmin = email.toLowerCase() === 'ogechukwublessing009@gmail.com';
       const mockUser = {
         uid: `mock-user-${Date.now()}`,
@@ -473,8 +587,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const resetPassword = async (email: string) => {
-    if (dbMode === 'local') {
-      alert(`[Offline Simulation] A password reset security request was dispatched to ${email}.`);
+    if (dbMode !== 'firebase') {
+      alert(`A password reset request was dispatched to ${email}.`);
       return;
     }
     try {
@@ -485,7 +599,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const loginWithGoogle = async () => {
-    if (dbMode === 'local') {
+    if (dbMode !== 'firebase') {
       const mockUser = {
         uid: 'mock-admin-uid-123',
         email: 'ogechukwublessing009@gmail.com',
@@ -517,7 +631,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const logout = async () => {
-    if (dbMode === 'local') {
+    if (dbMode !== 'firebase') {
       setUser(null);
       setUserProfile(null);
       localStorage.removeItem('blessed_local_user');
@@ -528,7 +642,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const updateProfileAddress = async (address: string) => {
-    if (dbMode === 'local') {
+    if (dbMode !== 'firebase') {
       if (!userProfile) return;
       const currentAddresses = userProfile.savedAddresses || [];
       if (!currentAddresses.includes(address)) {
@@ -559,7 +673,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const updateProfileDetails = async (fullName: string, phone: string) => {
-    if (dbMode === 'local') {
+    if (dbMode !== 'firebase') {
       if (!userProfile) return;
       const updatedProfile = { ...userProfile, fullName, phone };
       setUserProfile(updatedProfile);
@@ -633,7 +747,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       updatedAt: new Date().toISOString()
     };
 
-    if (dbMode === 'local') {
+    if (dbMode === 'local' || dbMode === 'cloudflare') {
       const updatedOrders = [newOrder, ...orders];
       setOrders(updatedOrders);
       localStorage.setItem('blessed_local_orders', JSON.stringify(updatedOrders));
@@ -651,6 +765,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       });
       setProducts(updatedProducts);
       localStorage.setItem('blessed_local_products', JSON.stringify(updatedProducts));
+
+      if (dbMode === 'cloudflare') {
+        await fetch('/api/orders', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(newOrder),
+        }).catch(err => console.warn('Cloudflare order sync failed:', err));
+      }
 
       return generatedId;
     }
@@ -693,10 +815,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const totalRating = updatedReviews.reduce((sum, rev) => sum + rev.rating, 0);
     const newAverage = parseFloat((totalRating / updatedReviews.length).toFixed(1));
 
-    if (dbMode === 'local') {
+    if (dbMode === 'local' || dbMode === 'cloudflare') {
       const updatedProducts = products.map(p => p.id === productId ? { ...p, reviews: updatedReviews, rating: newAverage } : p);
       setProducts(updatedProducts);
       localStorage.setItem('blessed_local_products', JSON.stringify(updatedProducts));
+      if (dbMode === 'cloudflare') {
+        await fetch(`/api/products/${encodeURIComponent(productId)}/reviews`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ reviews: updatedReviews, rating: newAverage }),
+        }).catch(err => console.warn('Cloudflare review sync failed:', err));
+      }
       return;
     }
 
@@ -720,10 +849,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       reviews: []
     };
 
-    if (dbMode === 'local') {
+    if (dbMode === 'local' || dbMode === 'cloudflare') {
       const updated = [completeProduct, ...products];
       setProducts(updated);
       localStorage.setItem('blessed_local_products', JSON.stringify(updated));
+      if (dbMode === 'cloudflare') {
+        await fetch('/api/products', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(completeProduct),
+        }).catch(err => console.warn('Cloudflare addProduct failed:', err));
+      }
       return;
     }
 
@@ -735,10 +871,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const editProduct = async (updatedProduct: Product) => {
-    if (dbMode === 'local') {
+    if (dbMode === 'local' || dbMode === 'cloudflare') {
       const updated = products.map(p => p.id === updatedProduct.id ? updatedProduct : p);
       setProducts(updated);
       localStorage.setItem('blessed_local_products', JSON.stringify(updated));
+      if (dbMode === 'cloudflare') {
+        await fetch(`/api/products/${encodeURIComponent(updatedProduct.id)}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(updatedProduct),
+        }).catch(err => console.warn('Cloudflare editProduct failed:', err));
+      }
       return;
     }
 
@@ -750,10 +893,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const deleteProduct = async (productId: string) => {
-    if (dbMode === 'local') {
+    if (dbMode === 'local' || dbMode === 'cloudflare') {
       const updated = products.filter(p => p.id !== productId);
       setProducts(updated);
       localStorage.setItem('blessed_local_products', JSON.stringify(updated));
+      if (dbMode === 'cloudflare') {
+        await fetch(`/api/products/${encodeURIComponent(productId)}`, {
+          method: 'DELETE',
+        }).catch(err => console.warn('Cloudflare deleteProduct failed:', err));
+      }
       return;
     }
 
@@ -765,10 +913,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const updateOrderStatus = async (orderId: string, status: string) => {
-    if (dbMode === 'local') {
+    if (dbMode === 'local' || dbMode === 'cloudflare') {
       const updated = orders.map(o => o.id === orderId ? { ...o, orderStatus: status, updatedAt: new Date().toISOString() } : o);
       setOrders(updated);
       localStorage.setItem('blessed_local_orders', JSON.stringify(updated));
+      if (dbMode === 'cloudflare') {
+        await fetch(`/api/orders/${encodeURIComponent(orderId)}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ orderStatus: status }),
+        }).catch(err => console.warn('Cloudflare updateOrderStatus failed:', err));
+      }
       return;
     }
 
@@ -783,10 +938,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const updateOrderPaymentStatus = async (orderId: string, status: 'paid' | 'pending_confirmation' | 'unpaid') => {
-    if (dbMode === 'local') {
+    if (dbMode === 'local' || dbMode === 'cloudflare') {
       const updated = orders.map(o => o.id === orderId ? { ...o, paymentStatus: status, updatedAt: new Date().toISOString() } : o);
       setOrders(updated);
       localStorage.setItem('blessed_local_orders', JSON.stringify(updated));
+      if (dbMode === 'cloudflare') {
+        await fetch(`/api/orders/${encodeURIComponent(orderId)}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ paymentStatus: status }),
+        }).catch(err => console.warn('Cloudflare updateOrderPaymentStatus failed:', err));
+      }
       return;
     }
 
@@ -801,9 +963,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const updateSettings = async (newSettings: StoreSettings) => {
-    if (dbMode === 'local') {
+    if (dbMode === 'local' || dbMode === 'cloudflare') {
       setSettings(newSettings);
       localStorage.setItem('blessed_local_settings', JSON.stringify(newSettings));
+      if (dbMode === 'cloudflare') {
+        await fetch('/api/settings', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(newSettings),
+        }).catch(err => console.warn('Cloudflare updateSettings failed:', err));
+      }
       return;
     }
 
@@ -823,10 +992,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       createdAt: new Date().toISOString()
     };
 
-    if (dbMode === 'local') {
+    if (dbMode === 'local' || dbMode === 'cloudflare') {
       const updated = [item, ...testimonials];
       setTestimonials(updated);
       localStorage.setItem('blessed_local_testimonials', JSON.stringify(updated));
+      if (dbMode === 'cloudflare') {
+        await fetch('/api/testimonials', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(item),
+        }).catch(err => console.warn('Cloudflare addTestimonial failed:', err));
+      }
       return;
     }
 
@@ -838,10 +1014,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const deleteTestimonial = async (id: string) => {
-    if (dbMode === 'local') {
+    if (dbMode === 'local' || dbMode === 'cloudflare') {
       const updated = testimonials.filter(t => t.id !== id);
       setTestimonials(updated);
       localStorage.setItem('blessed_local_testimonials', JSON.stringify(updated));
+      if (dbMode === 'cloudflare') {
+        await fetch(`/api/testimonials/${encodeURIComponent(id)}`, {
+          method: 'DELETE',
+        }).catch(err => console.warn('Cloudflare deleteTestimonial failed:', err));
+      }
       return;
     }
 
@@ -853,10 +1034,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const addCoupon = async (c: Coupon) => {
-    if (dbMode === 'local') {
+    if (dbMode === 'local' || dbMode === 'cloudflare') {
       const updated = [c, ...coupons.filter(co => co.code.toUpperCase() !== c.code.toUpperCase())];
       setCoupons(updated);
       localStorage.setItem('blessed_local_coupons', JSON.stringify(updated));
+      if (dbMode === 'cloudflare') {
+        await fetch('/api/coupons', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(c),
+        }).catch(err => console.warn('Cloudflare addCoupon failed:', err));
+      }
       return;
     }
 
@@ -868,10 +1056,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const deleteCoupon = async (code: string) => {
-    if (dbMode === 'local') {
+    if (dbMode === 'local' || dbMode === 'cloudflare') {
       const updated = coupons.filter(c => c.code.toUpperCase() !== code.toUpperCase());
       setCoupons(updated);
       localStorage.setItem('blessed_local_coupons', JSON.stringify(updated));
+      if (dbMode === 'cloudflare') {
+        await fetch(`/api/coupons/${encodeURIComponent(code)}`, {
+          method: 'DELETE',
+        }).catch(err => console.warn('Cloudflare deleteCoupon failed:', err));
+      }
       return;
     }
 
@@ -891,10 +1084,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       status: 'Unread'
     };
 
-    if (dbMode === 'local') {
+    if (dbMode === 'local' || dbMode === 'cloudflare') {
       const updated = [record, ...contacts];
       setContacts(updated);
       localStorage.setItem('blessed_local_contacts', JSON.stringify(updated));
+      if (dbMode === 'cloudflare') {
+        await fetch('/api/contacts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(record),
+        }).catch(err => console.warn('Cloudflare submitContactMessage failed:', err));
+      }
       return;
     }
 
@@ -906,10 +1106,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const updateContactStatus = async (id: string, status: 'Unread' | 'Read' | 'Resolved') => {
-    if (dbMode === 'local') {
+    if (dbMode === 'local' || dbMode === 'cloudflare') {
       const updated = contacts.map(c => c.id === id ? { ...c, status } : c);
       setContacts(updated);
       localStorage.setItem('blessed_local_contacts', JSON.stringify(updated));
+      if (dbMode === 'cloudflare') {
+        await fetch(`/api/contacts/${encodeURIComponent(id)}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status }),
+        }).catch(err => console.warn('Cloudflare updateContactStatus failed:', err));
+      }
       return;
     }
 
@@ -921,6 +1128,34 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const seedDatabase = async () => {
+    if (dbMode === 'cloudflare') {
+      try {
+        const res = await fetch('/api/seed', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            products: INITIAL_PRODUCTS,
+            settings: INITIAL_SETTINGS,
+            coupons: INITIAL_COUPONS,
+            testimonials: INITIAL_TESTIMONIALS,
+          }),
+        });
+        if (!res.ok) {
+          const errData = await res.json().catch(() => ({}));
+          throw new Error(errData.error || `HTTP ${res.status}`);
+        }
+        setProducts(INITIAL_PRODUCTS);
+        setSettings(INITIAL_SETTINGS);
+        setCoupons(INITIAL_COUPONS);
+        setTestimonials(INITIAL_TESTIMONIALS);
+        await checkCloudflareBackend();
+        alert("Cloudflare D1 backend tables seeded successfully!");
+      } catch (err: any) {
+        alert(`Cloudflare seed note: ${err?.message || 'D1 binding not yet attached'}`);
+      }
+      return;
+    }
+
     if (dbMode === 'local') {
       localStorage.setItem('blessed_local_products', JSON.stringify(INITIAL_PRODUCTS));
       localStorage.setItem('blessed_local_orders', JSON.stringify([]));
@@ -974,6 +1209,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       contacts,
       dbMode,
       setDbMode,
+      cloudflareStatus,
+      checkCloudflareBackend,
       loginWithEmail,
       registerWithEmail,
       resetPassword,

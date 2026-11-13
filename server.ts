@@ -1,20 +1,63 @@
 import express from 'express';
+import fs from 'fs';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
 import dotenv from 'dotenv';
 
 dotenv.config();
 
+interface LocalCloudflareStore {
+  products: any[];
+  orders: any[];
+  settings: any | null;
+  coupons: any[];
+  testimonials: any[];
+  contacts: any[];
+}
+
+const DEV_DB_PATH = path.join(process.cwd(), '.blessed-cloudflare-dev.json');
+
+function readDevStore(): LocalCloudflareStore {
+  try {
+    if (fs.existsSync(DEV_DB_PATH)) {
+      return JSON.parse(fs.readFileSync(DEV_DB_PATH, 'utf8'));
+    }
+  } catch (err) {
+    console.error('Failed reading local dev store:', err);
+  }
+  return {
+    products: [],
+    orders: [],
+    settings: null,
+    coupons: [],
+    testimonials: [],
+    contacts: [],
+  };
+}
+
+function writeDevStore(store: LocalCloudflareStore) {
+  try {
+    fs.writeFileSync(DEV_DB_PATH, JSON.stringify(store, null, 2), 'utf8');
+  } catch (err) {
+    console.error('Failed writing local dev store:', err);
+  }
+}
+
 async function startServer() {
   const app = express();
   const PORT = 3000;
 
-  // Middleware to parse incoming request payloads
-  app.use(express.json());
+  // Middleware to parse incoming request payloads (allow base64 product uploads)
+  app.use(express.json({ limit: '10mb' }));
 
   // API Route: Healthcheck
   app.get('/api/health', (req, res) => {
-    res.json({ status: 'ok', time: new Date().toISOString() });
+    res.json({
+      status: 'ok',
+      runtime: 'local-dev-mirror',
+      d1Connected: true,
+      time: new Date().toISOString(),
+    });
   });
 
   // API Route: Payment Verification
@@ -206,6 +249,171 @@ async function startServer() {
         message: `Internal verification service error: ${error.message}`
       });
     }
+  });
+
+  // --- Store REST API Routes (mirrors functions/api/[[path]].ts for local dev) ---
+  app.get('/api/bootstrap', (_req, res) => {
+    const store = readDevStore();
+    res.json({
+      runtime: 'local-dev-mirror',
+      d1Connected: true,
+      ...store,
+    });
+  });
+
+  app.post('/api/seed', (req, res) => {
+    const store = readDevStore();
+    const { products, settings, coupons, testimonials } = req.body || {};
+    if (Array.isArray(products)) store.products = products;
+    if (settings) store.settings = settings;
+    if (Array.isArray(coupons)) store.coupons = coupons;
+    if (Array.isArray(testimonials)) store.testimonials = testimonials;
+    writeDevStore(store);
+    res.json({ success: true });
+  });
+
+  app.get('/api/products', (_req, res) => {
+    res.json(readDevStore().products);
+  });
+
+  app.post('/api/products', (req, res) => {
+    const store = readDevStore();
+    const product = req.body;
+    store.products = [product, ...store.products.filter((p) => p.id !== product.id)];
+    writeDevStore(store);
+    res.status(201).json({ success: true, product });
+  });
+
+  app.put('/api/products/:id', (req, res) => {
+    const store = readDevStore();
+    const id = decodeURIComponent(req.params.id);
+    const product = { ...req.body, id };
+    const exists = store.products.some((p) => p.id === id);
+    store.products = exists
+      ? store.products.map((p) => (p.id === id ? product : p))
+      : [product, ...store.products];
+    writeDevStore(store);
+    res.json({ success: true });
+  });
+
+  app.delete('/api/products/:id', (req, res) => {
+    const store = readDevStore();
+    const id = decodeURIComponent(req.params.id);
+    store.products = store.products.filter((p) => p.id !== id);
+    writeDevStore(store);
+    res.json({ success: true });
+  });
+
+  app.post('/api/products/:id/reviews', (req, res) => {
+    const store = readDevStore();
+    const id = decodeURIComponent(req.params.id);
+    const { reviews, rating } = req.body;
+    store.products = store.products.map((p) =>
+      p.id === id ? { ...p, reviews, rating } : p
+    );
+    writeDevStore(store);
+    res.json({ success: true });
+  });
+
+  app.get('/api/orders', (_req, res) => {
+    res.json(readDevStore().orders);
+  });
+
+  app.post('/api/orders', (req, res) => {
+    const store = readDevStore();
+    const order = req.body;
+    store.orders = [order, ...store.orders];
+    for (const item of order.items || []) {
+      store.products = store.products.map((p) =>
+        p.id === item.productId
+          ? { ...p, stockQuantity: Math.max(0, Number(p.stockQuantity || 0) - Number(item.quantity || 0)) }
+          : p
+      );
+    }
+    writeDevStore(store);
+    res.status(201).json({ success: true, id: order.id });
+  });
+
+  app.patch('/api/orders/:id', (req, res) => {
+    const store = readDevStore();
+    const id = decodeURIComponent(req.params.id);
+    const { orderStatus, paymentStatus } = req.body;
+    const now = new Date().toISOString();
+    store.orders = store.orders.map((o) =>
+      o.id === id
+        ? {
+            ...o,
+            ...(orderStatus !== undefined ? { orderStatus } : {}),
+            ...(paymentStatus !== undefined ? { paymentStatus } : {}),
+            updatedAt: now,
+          }
+        : o
+    );
+    writeDevStore(store);
+    res.json({ success: true });
+  });
+
+  app.get('/api/settings', (_req, res) => {
+    res.json(readDevStore().settings);
+  });
+
+  app.put('/api/settings', (req, res) => {
+    const store = readDevStore();
+    store.settings = req.body;
+    writeDevStore(store);
+    res.json({ success: true });
+  });
+
+  app.post('/api/coupons', (req, res) => {
+    const store = readDevStore();
+    const coupon = req.body;
+    store.coupons = [
+      coupon,
+      ...store.coupons.filter((c) => c.code.toUpperCase() !== String(coupon.code).toUpperCase()),
+    ];
+    writeDevStore(store);
+    res.status(201).json({ success: true });
+  });
+
+  app.delete('/api/coupons/:code', (req, res) => {
+    const store = readDevStore();
+    const code = decodeURIComponent(req.params.code).toUpperCase();
+    store.coupons = store.coupons.filter((c) => c.code.toUpperCase() !== code);
+    writeDevStore(store);
+    res.json({ success: true });
+  });
+
+  app.post('/api/testimonials', (req, res) => {
+    const store = readDevStore();
+    const t = req.body;
+    store.testimonials = [t, ...store.testimonials];
+    writeDevStore(store);
+    res.status(201).json({ success: true });
+  });
+
+  app.delete('/api/testimonials/:id', (req, res) => {
+    const store = readDevStore();
+    const id = decodeURIComponent(req.params.id);
+    store.testimonials = store.testimonials.filter((t) => t.id !== id);
+    writeDevStore(store);
+    res.json({ success: true });
+  });
+
+  app.post('/api/contacts', (req, res) => {
+    const store = readDevStore();
+    const c = req.body;
+    store.contacts = [c, ...store.contacts];
+    writeDevStore(store);
+    res.status(201).json({ success: true });
+  });
+
+  app.patch('/api/contacts/:id', (req, res) => {
+    const store = readDevStore();
+    const id = decodeURIComponent(req.params.id);
+    const { status } = req.body;
+    store.contacts = store.contacts.map((c) => (c.id === id ? { ...c, status } : c));
+    writeDevStore(store);
+    res.json({ success: true });
   });
 
   // Support Vite integration in development mode

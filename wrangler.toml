@@ -1,0 +1,13 @@
+name = "blessed-multi-products"
+compatibility_date = "2025-04-01"
+pages_build_output_dir = "dist"
+
+# To connect a Cloudflare D1 database:
+# 1. Create a D1 database in Cloudflare Dashboard or run: npx wrangler d1 create blessed-db
+# 2. Uncomment the [[d1_databases]] block below and replace YOUR_D1_DATABASE_ID
+#    (or bind the D1 database with variable name "DB" in Cloudflare Pages -> Settings -> Bindings)
+#
+# [[d1_databases]]
+# binding = "DB"
+# database_name = "blessed-db"
+# database_id = "YOUR_D1_DATABASE_ID"
