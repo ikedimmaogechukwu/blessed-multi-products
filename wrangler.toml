@@ -1,11 +1,18 @@
 name = "blessed-multi-products"
+main = "worker.ts"
 compatibility_date = "2025-04-01"
-pages_build_output_dir = "dist"
+
+[assets]
+directory = "./dist"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+run_worker_first = ["/api/*"]
 
 # To connect a Cloudflare D1 database:
-# 1. Create a D1 database in Cloudflare Dashboard or run: npx wrangler d1 create blessed-db
+# 1. Create a D1 database in Cloudflare Dashboard -> Storage & Databases -> D1, or run:
+#      npx wrangler d1 create blessed-db
 # 2. Uncomment the [[d1_databases]] block below and replace YOUR_D1_DATABASE_ID
-#    (or bind the D1 database with variable name "DB" in Cloudflare Pages -> Settings -> Bindings)
+#    (or bind a D1 database with variable name "DB" in Cloudflare Workers -> Settings -> Bindings)
 #
 # [[d1_databases]]
 # binding = "DB"

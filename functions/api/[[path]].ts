@@ -305,9 +305,10 @@ async function verifyPayment(
   });
 }
 
-export const onRequest: PagesFunction<CloudflareEnv> = async (context) => {
-  const { request, env } = context;
-
+export async function handleApiRequest(
+  request: Request,
+  env: CloudflareEnv
+): Promise<Response> {
   if (request.method === 'OPTIONS') {
     return new Response(null, { status: 204, headers: CORS_HEADERS });
   }
@@ -321,7 +322,7 @@ export const onRequest: PagesFunction<CloudflareEnv> = async (context) => {
     if (pathname === '/api/health' && method === 'GET') {
       return jsonResponse({
         status: 'ok',
-        runtime: 'cloudflare-pages-functions',
+        runtime: 'cloudflare-workers',
         d1Connected: Boolean(db),
         time: new Date().toISOString(),
       });
@@ -368,7 +369,7 @@ export const onRequest: PagesFunction<CloudflareEnv> = async (context) => {
       ]);
 
       return jsonResponse({
-        runtime: 'cloudflare-pages-functions',
+        runtime: 'cloudflare-workers',
         d1Connected: true,
         products: prodRes.results.map(mapProductRow),
         orders: ordRes.results.map(mapOrderRow),
@@ -713,4 +714,8 @@ export const onRequest: PagesFunction<CloudflareEnv> = async (context) => {
       500
     );
   }
+}
+
+export const onRequest: PagesFunction<CloudflareEnv> = async (context) => {
+  return handleApiRequest(context.request, context.env);
 };
